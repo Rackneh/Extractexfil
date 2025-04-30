@@ -5,223 +5,153 @@ from mathutils import Euler
 import math
 import os
 
-# This is the base dir that contains all the unpacked assets - unpack using the latest ACL compatible build UE Viewer
-base_dir = "F:\HogwartsExport\Assets"
-
-# This is a subdirectory where you can insert additional parts of the path to the assets
+# Base directory containing all unpacked assets (exported via UE Viewer)
+base_dir = r"D:\Unity\Packages\CSXfil assets"
+# Optional subdirectory under base_dir if assets reside in a specific folder
 asset_sub_dir = ""
-
-# This is the path to the JSON file that contains the map data - you can extract this from .umap files using FModel.exe
+# List of JSON map files exported (contains entity definitions)
 map_json = [
-    'F:\HogwartsExport\MapJSON\SUB_ThreeBroomsticks_EXT.json',
-    'F:\HogwartsExport\MapJSON\SUB_ThreeBroomsticks_FX.json',
-    'F:\HogwartsExport\MapJSON\SUB_ThreeBroomsticks_INT.json',
-    'F:\HogwartsExport\MapJSON\SUB_ThreeBroomsticks_LIGHTS.json',
-    'F:\HogwartsExport\MapJSON\SUB_ThreeBroomsticks_POP.json',
-    'F:\HogwartsExport\MapJSON\SUB_ThreeBroomsticks_TECH.json',
+    r'C:\Users\Rackneh\Downloads\FModel\Output\Exports\Contractors_Showdown\Plugins\Maps\BattleRoyale\Content\Level_IslandForest\A_Dam.json',
 ]
-
-# importer toggles
+# Toggles
 import_static = True
-import_lights = False # enable to also import lights
+import_lights = False  # enable if you want lights
 
-# Import types supported by the script
-static_mesh_types = [
-    'StaticMeshComponent',
-#    'InstancedStaticMeshComponent' # buggy, positions wrong, seems to be used with splines as well
-]
-light_types = [
-    'SpotLightComponent',
-    'AnimatedLightComponent',
-    'PointLightComponent'
-]
+static_mesh_types = ['StaticMeshComponent']
+light_types = ['SpotLightComponent', 'AnimatedLightComponent', 'PointLightComponent']
 
-def split_object_path(object_path):
-    # For some reason ObjectPaths end with a period and a digit.
-    # This is kind of a sucky way to split that out.
-        
-    path_parts = object_path.split(".")
-    
-    if len(path_parts) > 1:
-        # Usually works, but will fail If the path contains multiple periods.
-        return path_parts[0]
-    
-    # Nothing to do
+
+def split_object_path(object_path: str) -> str:
+    """
+    Strip trailing package suffix from Unreal ObjectPath, e.g. '/Game/Path/Mesh.Mesh' -> '/Game/Path/Mesh'
+    Uses rsplit to handle paths with multiple dots.
+    """
+    if isinstance(object_path, str) and "." in object_path:
+        return object_path.rsplit('.', 1)[0]
     return object_path
-    
+
 
 class StaticMesh:
-    entity_name = ""
-    import_path = ""
-    pos = [0, 0, 0]
-    rot = [0, 0, 0]
-    scale = [1, 1, 1]
-    
-    # these are just properties to help with debugging
-    no_entity = False
-    no_file = False
-    no_mesh = False
-    no_path = False
-    base_shape = False
-    
-    
-    def __init__(self, json_entity, base_dir):
-        self.entity_name = json_entity.get("Outer", 'Error')
+    def __init__(self, json_entity: dict, base_dir: str, asset_sub_dir: str = ""):
+        self.entity_name = json_entity.get("Outer", "UnknownEntity")
+        props = json_entity.get("Properties")
+        if not props or not props.get("StaticMesh"):
+            self.invalid = True
+            return
 
-        props = json_entity.get("Properties", None)
-        if not props:
-            print('Invalid Entity: Lacking property')
-            self.no_entity = True
-            return None
-        
-        if not props.get("StaticMesh", None):
-            print('Invalid Property: does not contain a static mesh')
-            self.no_mesh = True
-            return None
+        object_path = props["StaticMesh"].get("ObjectPath", "")
+        if not object_path:
+            self.invalid = True
+            return
 
-        object_path = props.get("StaticMesh").get("ObjectPath", None)
-        
-        if not object_path or object_path == '':
-            print('Invalid StaticMesh: does not contain ObjectPath.')
-            self.no_path = True
-            return None
+        objpath = split_object_path(object_path)  # '/Game/.../Mesh'
+        # Remove leading slash and build file path
+        rel_path = objpath.lstrip('/')  # 'Game/.../Mesh'
+        # Combine base_dir, asset_sub_dir, and rel_path
+        file_rel = rel_path + ".gltf"
+        full_path = os.path.join(base_dir, asset_sub_dir, file_rel)
+        self.import_path = os.path.normpath(full_path)
+        self.invalid = not os.path.exists(self.import_path)
+        if self.invalid:
+            print(f"Asset not found: {self.import_path}")
+            return
 
-        if 'BasicShapes' in object_path:
-            # What is a BasicShape? Do we need these?
-            print('This is a BasicShape - skipping for now')
-            self.base_shape = True
-            return None
-        
-        objpath = split_object_path(object_path)
-        self.import_path = base_dir + asset_sub_dir + objpath + ".gltf"
-        print('Mesh Path', self.import_path)
-        self.no_file = not os.path.exists(self.import_path)
-
-        if props.get("RelativeLocation", False):
-            pos = props.get("RelativeLocation")
-            self.pos = [pos.get("X")/100,pos.get("Y")/-100,pos.get("Z")/100]
-        
-        if props.get("RelativeRotation", False):
-            rot = props.get("RelativeRotation")
-            self.rot = [rot.get("Roll"),rot.get("Pitch")*-1,rot.get("Yaw")*-1]
-        
-        if props.get("RelativeScale3D", False):
-            scale = props.get("RelativeScale3D")
-            self.scale = [scale.get("X", 1),scale.get("Y", 1),scale.get("Z", 1)]
-        
-        return None
-    
-    @property
-    def invalid(self):
-        return self.no_path or self.no_file or self.no_entity or self.base_shape or self.no_mesh
-        
+        # Read transforms (convert cm to m and adjust axes)
+        loc = props.get("RelativeLocation", {})
+        self.pos = (
+            loc.get("X", 0) / 100,
+            -loc.get("Y", 0) / 100,
+            loc.get("Z", 0) / 100,
+        )
+        rot = props.get("RelativeRotation", {})
+        self.rot = (
+            math.radians(rot.get("Roll", 0)),
+            math.radians(-rot.get("Pitch", 0)),
+            math.radians(-rot.get("Yaw", 0)),
+        )
+        scl = props.get("RelativeScale3D", {})
+        self.scale = (
+            scl.get("X", 1),
+            scl.get("Y", 1),
+            scl.get("Z", 1),
+        )
 
     def import_staticmesh(self, collection):
         if self.invalid:
-            print('Refusing to import due to failed checks.')
-            return False
-        # Import the file and apply transforms
+            return None
         bpy.ops.import_scene.gltf(filepath=self.import_path)
-        imported_obj = bpy.context.object
-        
-        imported_obj.name = self.entity_name
-        imported_obj.scale = (self.scale[0], self.scale[1], self.scale[2])
-        imported_obj.location = (self.pos[0], self.pos[1], self.pos[2])
-        imported_obj.rotation_mode = 'XYZ'
-        imported_obj.rotation_euler = Euler((math.radians(self.rot[0]), math.radians(self.rot[1]), math.radians(self.rot[2])), 'XYZ')
-        collection.objects.link(imported_obj)
-        bpy.context.scene.collection.objects.unlink(imported_obj)
-
-        print('StaticMesh imported:', self.entity_name)
-        return imported_obj
+        obj = bpy.context.object
+        obj.name = self.entity_name
+        obj.location = self.pos
+        obj.scale = self.scale
+        obj.rotation_mode = 'XYZ'
+        obj.rotation_euler = Euler(self.rot, 'XYZ')
+        # Move to target collection
+        collection.objects.link(obj)
+        bpy.context.scene.collection.objects.unlink(obj)
+        print(f"Imported: {self.entity_name}")
+        return obj
 
 
 class GameLight:
-    entity_name = ""
-    type = ""
+    def __init__(self, json_entity: dict):
+        self.entity_name = json_entity.get("Outer", "UnknownLight")
+        self.type = json_entity.get("Type", "SpotLightComponent")
+        props = json_entity.get("Properties")
+        self.invalid = not props
+        if self.invalid:
+            return
 
-    pos = [0, 0, 0]
-    rot = [0, 0, 0]
-    scale = [1, 1, 1]
+        loc = props.get("RelativeLocation", {})
+        self.pos = (
+            loc.get("X", 0) / 100,
+            -loc.get("Y", 0) / 100,
+            loc.get("Z", 0) / 100,
+        )
+        rot = props.get("RelativeRotation", {})
+        self.rot = (
+            math.radians(rot.get("Roll", 0)),
+            math.radians(-rot.get("Pitch", 0)),
+            math.radians(-rot.get("Yaw", 0)),
+        )
+        scl = props.get("RelativeScale3D", {})
+        self.scale = (
+            scl.get("X", 1),
+            scl.get("Y", 1),
+            scl.get("Z", 1),
+        )
 
-    energy = 1000
-
-    no_entity = False
-
-    def __init__(self, json_entity):
-        self.entity_name = json_entity.get("Outer", 'Error')
-        self.type = json_entity.get("SpotLightComponent", "SpotLightComponent")
-
-        props = json_entity.get("Properties", None)
-        if not props:
-            print('Invalid Entity: Lacking property')
-            self.no_entity = True
-            return None
-        
-        if props.get("RelativeLocation", False):
-            pos = props.get("RelativeLocation")
-            self.pos = [pos.get("X")/100,pos.get("Y")/-100,pos.get("Z")/100]
-        
-        if props.get("RelativeRotation", False):
-            rot = props.get("RelativeRotation")
-            self.rot = [rot.get("Roll"),rot.get("Pitch")*-1,rot.get("Yaw")*-1]
-        
-        if props.get("RelativeScale3D", False):
-            scale = props.get("RelativeScale3D")
-            self.scale = [scale.get("X", 1),scale.get("Y", 1),scale.get("Z", 1)]
-
-        #TODO: expand this method with more properties for the specific light types
-        # Problem: I don't know how values for UE lights map to Blender's light types.
-    
     def import_light(self, collection):
-        if self.no_entity:
-            print('Refusing to import due to failed checks.')
-            return False
-        print('importing light')
-        if self.type == 'SpotLightComponent':
-            light_data = bpy.data.lights.new(name=self.entity_name, type='SPOT')
-        if self.type == 'PointLightComponent':
-            light_data = bpy.data.lights.new(name=self.entity_name, type='POINT')
-        
-        light_obj = bpy.data.objects.new(name=self.entity_name, object_data=light_data)
-        light_obj.scale = (self.scale[0], self.scale[1], self.scale[2])
-        light_obj.location = (self.pos[0], self.pos[1], self.pos[2])
+        if self.invalid:
+            return None
+        lt_type = 'POINT' if 'PointLight' in self.type else 'SPOT'
+        light_data = bpy.data.lights.new(self.entity_name, lt_type)
+        light_obj = bpy.data.objects.new(self.entity_name, light_data)
+        light_obj.location = self.pos
+        light_obj.scale = self.scale
         light_obj.rotation_mode = 'XYZ'
-        light_obj.rotation_euler = Euler((math.radians(self.rot[0]), math.radians(self.rot[1]), math.radians(self.rot[2])), 'XYZ')
+        light_obj.rotation_euler = Euler(self.rot, 'XYZ')
         collection.objects.link(light_obj)
-        bpy.context.scene.collection.objects.link(light_obj)
+        print(f"Light imported: {self.entity_name}")
+        return light_obj
 
 
-# SCRIPT STARTS DOING STUFF HERE
-for map in map_json:
-    print('Processing file', map)
-
-    if not os.path.exists(map):
-        print('File not found, skipping.', map)
+# Main processing loop
+for map_file in map_json:
+    if not os.path.exists(map_file):
+        print(f"Map JSON not found: {map_file}")
         continue
-
-    json_filename = os.path.basename(map)
-    import_collection = bpy.data.collections.new(json_filename)
-    
-    bpy.context.scene.collection.children.link(import_collection)
-
-    with open(map) as file: 
-        json_object = json.load(file)
-        print("-------------============================-------------")
-
-        # Handle the different entity types
-        for entity in json_object:
-            if not entity.get('Type', None):
-                continue
-
-            if import_lights and entity.get('Type') in light_types:
-                print(entity)
-                light = GameLight(entity)
-                light.import_light(import_collection)
-
-            if import_static and entity.get('Type') in static_mesh_types:
-                static_mesh = StaticMesh(entity, base_dir)
-                # TODO: optimize by instancing certain meshes
-                static_mesh.import_staticmesh(import_collection)
-                continue
-print('Done.')
+    json_name = os.path.splitext(os.path.basename(map_file))[0]
+    coll = bpy.data.collections.new(json_name)
+    bpy.context.scene.collection.children.link(coll)
+    with open(map_file, 'r') as f:
+        entities = json.load(f)
+    for ent in entities:
+        t = ent.get('Type')
+        if import_static and t in static_mesh_types:
+            mesh = StaticMesh(ent, base_dir, asset_sub_dir)
+            mesh.import_staticmesh(coll)
+        if import_lights and t in light_types:
+            light = GameLight(ent)
+            light.import_light(coll)
+print('Import complete.')
