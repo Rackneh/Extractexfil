@@ -30,51 +30,47 @@ def split_object_path(object_path: str) -> str:
         return object_path.rsplit('.', 1)[0]
     return object_path
 
-
 class StaticMesh:
     def __init__(self, json_entity: dict, base_dir: str, asset_sub_dir: str = ""):
         self.entity_name = json_entity.get("Outer", "UnknownEntity")
-        props = json_entity.get("Properties")
-        if not props or not props.get("StaticMesh"):
+        props = json_entity.get("Properties", {})
+        obj_path = props.get("StaticMesh", {}).get("ObjectPath", "")
+        if not obj_path:
             self.invalid = True
             return
 
-        object_path = props["StaticMesh"].get("ObjectPath", "")
-        if not object_path:
+        objpath = split_object_path(obj_path)  # '/Game/.../Mesh'
+        # Remove leading slash
+        rel = objpath.lstrip('/')            # 'Game/.../Mesh'
+        base = os.path.normpath(os.path.join(base_dir, asset_sub_dir, rel))
+
+        # Try both extensions
+        candidates = [base + ext for ext in (".gltf", ".glb")]
+        found = [p for p in candidates if os.path.exists(p)]
+        if not found:
             self.invalid = True
+            print(f"Asset not found (tried .gltf/.glb): {candidates}")
             return
 
-        objpath = split_object_path(object_path)  # '/Game/.../Mesh'
-        # Remove leading slash and build file path
-        rel_path = objpath.lstrip('/')  # 'Game/.../Mesh'
-        # Combine base_dir, asset_sub_dir, and rel_path
-        file_rel = rel_path + ".gltf"
-        full_path = os.path.join(base_dir, asset_sub_dir, file_rel)
-        self.import_path = os.path.normpath(full_path)
-        self.invalid = not os.path.exists(self.import_path)
-        if self.invalid:
-            print(f"Asset not found: {self.import_path}")
-            return
+        # pick the first existing (gltf preferred over glb)
+        self.import_path = found[0]
 
-        # Read transforms (convert cm to m and adjust axes)
+        # Read and convert transforms...
         loc = props.get("RelativeLocation", {})
-        self.pos = (
-            loc.get("X", 0) / 100,
-            -loc.get("Y", 0) / 100,
-            loc.get("Z", 0) / 100,
-        )
+        self.pos = (loc.get("X",0)/100, -loc.get("Y",0)/100, loc.get("Z",0)/100)
         rot = props.get("RelativeRotation", {})
         self.rot = (
-            math.radians(rot.get("Roll", 0)),
-            math.radians(-rot.get("Pitch", 0)),
-            math.radians(-rot.get("Yaw", 0)),
+            math.radians(rot.get("Roll",0)),
+            math.radians(-rot.get("Pitch",0)),
+            math.radians(-rot.get("Yaw",0)),
         )
         scl = props.get("RelativeScale3D", {})
         self.scale = (
-            scl.get("X", 1),
-            scl.get("Y", 1),
-            scl.get("Z", 1),
+            scl.get("X",1),
+            scl.get("Y",1),
+            scl.get("Z",1),
         )
+        self.invalid = False
 
     def import_staticmesh(self, collection):
         if self.invalid:
